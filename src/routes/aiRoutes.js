@@ -6,6 +6,7 @@ import {
   generateQuiz,
   generateFlashcards,
   explainFailedTopics,
+  getProcessingStatus,
 } from "../controllers/aiController.js";
 
 const router = express.Router();
@@ -19,5 +20,6 @@ router.post(
   rateLimiter,
   explainFailedTopics,
 );
+router.get("/status/:noteId", protect, getProcessingStatus);
 
 export default router;

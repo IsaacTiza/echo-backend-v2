@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import Note from "../models/Note.js";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
@@ -12,7 +13,7 @@ const toneInstructions = {
   academic:
     "Explain in a formal academic tone with proper terminology and structure.",
   bullet:
-    "Explain using clear bullet points and short sentences. Be concise and organized.", 
+    "Explain using clear bullet points and short sentences. Be concise and organized.",
 };
 
 const getNoteContent = async (note) => {
@@ -127,4 +128,45 @@ Be encouraging in tone. Start with "Let's go over the areas you need to review:"
     contents: [{ role: "user", parts }],
   });
   return result.response.text();
+};
+export const processNoteInBackground = async (noteId) => {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  try {
+    const note = await Note.findById(noteId);
+    if (!note) return;
+
+    await Note.findByIdAndUpdate(noteId, { processingStatus: "processing" });
+
+    const tones = ["simple", "detailed", "eli5", "academic", "bullet"];
+    const explanations = {};
+
+    for (const tone of tones) {
+      try {
+        explanations[tone] = await explainNotePrompt(note, tone);
+        await wait(3000); // 3 second gap between each tone
+      } catch {
+        explanations[tone] = "";
+      }
+    }
+
+    await wait(3000); // gap before quiz
+    const quiz = await generateQuizPrompt(note, 12);
+
+    await wait(3000); // gap before flashcards
+    const flashcards = await generateFlashcardsPrompt(note);
+
+    await Note.findByIdAndUpdate(noteId, {
+      explanations,
+      quiz,
+      flashcards,
+      processingStatus: "complete",
+    });
+  } catch (error) {
+    console.error(
+      `[Background] Processing failed for note ${noteId}:`,
+      error.message,
+    );
+    await Note.findByIdAndUpdate(noteId, { processingStatus: "failed" });
+  }
 };

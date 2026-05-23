@@ -1,8 +1,7 @@
 import Note from "../models/Note.js";
 import cloudinary from "../config/cloudinary.js";
 import mammoth from "mammoth";
-// import officeParser from "officeparser";
-// import officeParser from "officeparser";
+import { processNoteInBackground } from "../utils/gemini.js";
 
 const extractTextFromFile = async (file) => {
   const mime = file.mimetype;
@@ -37,10 +36,9 @@ const getFileType = (mime) => {
 
 export const createNote = async (req, res) => {
   try {
-    const { title, tags, tone } = req.body;
+    const { title, tags } = req.body;
     let { content } = req.body;
     let fileUrl = "";
-    let extractedText = "";
     let type = "text";
 
     if (!title) {
@@ -49,7 +47,7 @@ export const createNote = async (req, res) => {
 
     if (req.file) {
       type = getFileType(req.file.mimetype);
-      extractedText = await extractTextFromFile(req.file);
+      const extractedText = await extractTextFromFile(req.file);
 
       const uploadResult = await new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
@@ -76,23 +74,28 @@ export const createNote = async (req, res) => {
       type = "text";
     }
 
-   const note = await Note.create({
-     userId: req.user._id,
-     title,
-     type,
-     content,
-     fileUrl,
-     originalFilename: req.file ? req.file.originalname : "",
-     tags: tags ? JSON.parse(tags) : [],
-     tone: tone || "simple",
-   });
+    const note = await Note.create({
+      userId: req.user._id,
+      title,
+      type,
+      content,
+      fileUrl,
+      originalFilename: req.file ? req.file.originalname : "",
+      tags: tags ? JSON.parse(tags) : [],
+      processingStatus: "pending",
+    });
 
+    // Respond immediately — don't make the user wait
     res.status(201).json({ note });
+
+    // Fire background processing — no await, runs after response
+    processNoteInBackground(note._id);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
+// All other functions remain exactly the same
 export const getNotes = async (req, res) => {
   try {
     const notes = await Note.find({ userId: req.user._id }).sort({
@@ -110,23 +113,20 @@ export const getNote = async (req, res) => {
       _id: req.params.id,
       userId: req.user._id,
     });
-
-    if (!note) {
-      return res.status(404).json({ message: "Note not found" });
-    }
-
+    if (!note) return res.status(404).json({ message: "Note not found" });
     res.status(200).json({ note });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
+
 export const deleteNote = async (req, res) => {
   try {
-    const note = await Note.findOne({ _id: req.params.id, userId: req.user._id });
-
-    if (!note) {
-      return res.status(404).json({ message: "Note not found" });
-    }
+    const note = await Note.findOne({
+      _id: req.params.id,
+      userId: req.user._id,
+    });
+    if (!note) return res.status(404).json({ message: "Note not found" });
 
     if (note.fileUrl) {
       try {
@@ -144,32 +144,27 @@ export const deleteNote = async (req, res) => {
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
-};  
+};
+
 export const downloadNote = async (req, res) => {
   try {
     const note = await Note.findOne({
       _id: req.params.id,
       userId: req.user._id,
     });
-
-    if (!note) {
-      return res.status(404).json({ message: "Note not found" });
-    }
+    if (!note) return res.status(404).json({ message: "Note not found" });
 
     if (note.fileUrl) {
       const response = await fetch(note.fileUrl);
       const buffer = await response.arrayBuffer();
-
       const extMap = {
         pdf: "application/pdf",
         image: "image/jpeg",
         docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         txt: "text/plain",
       };
-
       const mimeType = extMap[note.type] || "application/octet-stream";
-      const filename = note.originalFilename || `${note.title}`;
-
+      const filename = note.originalFilename || note.title;
       res.setHeader("Content-Type", mimeType);
       res.setHeader(
         "Content-Disposition",
