@@ -64,12 +64,21 @@ export const generateQuiz = async (req, res) => {
     });
     if (!note) return res.status(404).json({ message: "Note not found" });
 
+    const count = parseInt(req.body.count) || 10;
+    const usedIds = new Set((req.body.usedIds || []).map(String));
     const cacheKey = `quiz:${note._id}`;
+
+    const pickFrom = (pool) =>
+      pool.filter((q) => !usedIds.has(String(q._id))).slice(0, count);
 
     // 1. Check Redis
     const cached = await getCache(cacheKey);
     if (cached) {
-      return res.status(200).json({ quiz: cached, source: "redis" });
+      const questions = pickFrom(cached);
+      if (questions.length >= count) {
+        return res.status(200).json({ quiz: questions, source: "redis" });
+      }
+      // Not enough unseen in cache — fall through to DB
     }
 
     // 2. Check MongoDB
@@ -78,24 +87,38 @@ export const generateQuiz = async (req, res) => {
         await req.incrementUsage();
         await Note.findByIdAndUpdate(note._id, { "charged.quiz": true });
       }
-      await setCache(cacheKey, note.quiz);
-      return res.status(200).json({ quiz: note.quiz, source: "db" });
+
+      const questions = pickFrom(note.quiz);
+
+      if (questions.length >= count) {
+        await setCache(cacheKey, note.quiz);
+        return res.status(200).json({ quiz: questions, source: "db" });
+      }
+
+      // Pool exhausted — generate a fresh batch and append
+      const freshBatch = await generateQuizPrompt(note, 15, note.quiz);
+      const expandedPool = [...note.quiz, ...freshBatch];
+
+      await Note.findByIdAndUpdate(note._id, { quiz: expandedPool });
+      await setCache(cacheKey, expandedPool);
+
+      const freshPick = pickFrom(expandedPool);
+      return res
+        .status(200)
+        .json({ quiz: freshPick.slice(0, count), source: "expanded" });
     }
 
-    // 3. Call Gemini
-    const count = req.body.count || 12;
-    const quiz = await generateQuizPrompt(note, count);
+    // 3. Gemini fallback (quiz was never pre-generated)
+    const quiz = await generateQuizPrompt(note, 25);
     await req.incrementUsage();
-
     await Note.findByIdAndUpdate(note._id, { quiz, "charged.quiz": true });
     await setCache(cacheKey, quiz);
 
-    res.status(200).json({ quiz, source: "generated" });
+    res.status(200).json({ quiz: pickFrom(quiz), source: "generated" });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
-
 export const generateFlashcards = async (req, res) => {
   try {
     const note = await Note.findOne({

@@ -128,16 +128,26 @@ export const deleteNote = async (req, res) => {
     });
     if (!note) return res.status(404).json({ message: "Note not found" });
 
-    if (note.fileUrl) {
-      try {
-        const urlParts = note.fileUrl.split("/");
-        const folderAndFile = urlParts.slice(-2).join("/");
-        const publicId = folderAndFile.split(".")[0];
-        await cloudinary.uploader.destroy(publicId, { resource_type: "auto" });
-      } catch (cloudinaryError) {
-        console.error("Cloudinary delete error:", cloudinaryError);
-      }
-    }
+ if (note.fileUrl) {
+   try {
+     const urlParts = note.fileUrl.split("/");
+     const folderAndFile = urlParts.slice(-2).join("/");
+     const publicId = folderAndFile.split(".")[0];
+
+     const resourceType =
+       note.type === "pdf"
+         ? "raw"
+         : ["jpg", "jpeg", "png", "gif", "webp"].includes(note.type)
+           ? "image"
+           : "raw"; // safe fallback for anything else
+
+     await cloudinary.uploader.destroy(publicId, {
+       resource_type: resourceType,
+     });
+   } catch (cloudinaryError) {
+     console.error("Cloudinary delete error:", cloudinaryError);
+   }
+ }
 
     await note.deleteOne();
     res.status(200).json({ message: "Note deleted successfully" });

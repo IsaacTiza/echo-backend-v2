@@ -69,8 +69,17 @@ export const explainNotePrompt = async (note, tone) => {
   return result.response.text();
 };
 
-export const generateQuizPrompt = async (note, count) => {
-  const promptText = `You are an expert study assistant. Generate exactly ${count} multiple choice questions based on the following study note.
+export const generateQuizPrompt = async (
+  note,
+  count,
+  existingQuestions = [],
+) => {
+  const exclusionBlock =
+    existingQuestions.length > 0
+      ? `\n\nDo NOT repeat or rephrase any of these existing questions:\n${existingQuestions.map((q, i) => `${i + 1}. ${q.question}`).join("\n")}`
+      : "";
+
+  const promptText = `You are an expert study assistant. Generate exactly ${count} multiple choice questions based on the following study note.${exclusionBlock}
 
 Return ONLY a valid JSON array with no extra text, markdown, or code blocks. Use this exact format:
 [
@@ -88,7 +97,6 @@ Return ONLY a valid JSON array with no extra text, markdown, or code blocks. Use
   });
   const text = result.response.text();
 
-  // Strip markdown code blocks if Gemini adds them
   const clean = text.replace(/```json|```/g, "").trim();
   return JSON.parse(clean);
 };
@@ -151,7 +159,7 @@ export const processNoteInBackground = async (noteId) => {
     }
 
     await wait(3000); // gap before quiz
-    const quiz = await generateQuizPrompt(note, 12);
+    const quiz = await generateQuizPrompt(note, 25); // was 12
 
     await wait(3000); // gap before flashcards
     const flashcards = await generateFlashcardsPrompt(note);
