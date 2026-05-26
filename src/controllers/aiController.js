@@ -7,6 +7,9 @@ import {
   explainFailedTopicsPrompt,
 } from "../utils/gemini.js";
 
+import jwt from "jsonwebtoken";
+import User from "../models/User.js";
+
 export const explainNote = async (req, res) => {
   try {
     const note = await Note.findOne({
@@ -193,6 +196,111 @@ export const getProcessingStatus = async (req, res) => {
     );
     if (!note) return res.status(404).json({ message: "Note not found" });
     res.status(200).json({ status: note.processingStatus });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+export const streamProcessingStatus = async (req, res) => {
+  try {
+    // Verify token from query param since EventSource can't send headers
+    const token = req.query.token;
+    if (!token)
+      return res.status(401).json({ message: "Not authorized, no token" });
+
+    let user;
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      user = await User.findById(decoded.id).select("-providerId");
+      if (!user) return res.status(401).json({ message: "User not found" });
+    } catch {
+      return res.status(401).json({ message: "Not authorized, token failed" });
+    }
+
+    const note = await Note.findOne({
+      _id: req.params.noteId,
+      userId: user._id,
+    });
+    if (!note) return res.status(404).json({ message: "Note not found" });
+
+    // SSE headers
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    // Already done — send immediately and close
+    if (
+      note.processingStatus === "complete" ||
+      note.processingStatus === "failed"
+    ) {
+      res.write(
+        `data: ${JSON.stringify({ status: note.processingStatus })}\n\n`,
+      );
+      return res.end();
+    }
+
+    // Poll DB and stream updates
+    const interval = setInterval(async () => {
+      try {
+        const updated = await Note.findById(note._id).select(
+          "processingStatus",
+        );
+        const status = updated?.processingStatus;
+
+        res.write(`data: ${JSON.stringify({ status })}\n\n`);
+
+        if (status === "complete" || status === "failed") {
+          clearInterval(interval);
+          clearTimeout(timeout);
+          res.end();
+        }
+      } catch {
+        clearInterval(interval);
+        res.end();
+      }
+    }, 3000);
+
+    // Stop after 3 minutes
+    const timeout = setTimeout(() => {
+      clearInterval(interval);
+      res.end();
+    }, 180000);
+
+    // Clean up if client disconnects early
+    req.on("close", () => {
+      clearInterval(interval);
+      clearTimeout(timeout);
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+export const retryNote = async (req, res) => {
+  try {
+    const note = await Note.findOne({
+      _id: req.params.noteId,
+      userId: req.user._id,
+    });
+
+    if (!note) return res.status(404).json({ message: "Note not found" });
+
+    if (note.processingStatus !== "failed") {
+      return res
+        .status(400)
+        .json({ message: "Only failed notes can be retried" });
+    }
+
+    await Note.findByIdAndUpdate(req.params.noteId, {
+      processingStatus: "pending",
+      explanations: {},
+      quiz: [],
+      flashcards: [],
+    });
+
+    processNoteInBackground(req.params.noteId);
+
+    res.status(200).json({ message: "Retry started" });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

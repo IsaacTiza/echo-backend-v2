@@ -7,6 +7,8 @@ import {
   generateFlashcards,
   explainFailedTopics,
   getProcessingStatus,
+  streamProcessingStatus,
+  retryNote, // new endpoint for streaming status updates
 } from "../controllers/aiController.js";
 
 const router = express.Router();
@@ -21,5 +23,7 @@ router.post(
   explainFailedTopics,
 );
 router.get("/status/:noteId", protect, getProcessingStatus);
+router.get("/status/stream/:noteId", streamProcessingStatus);
+router.post("/retry/:noteId", protect, retryNote);
 
 export default router;

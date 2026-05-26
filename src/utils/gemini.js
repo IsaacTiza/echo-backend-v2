@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import Note from "../models/Note.js";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
 const toneInstructions = {
   simple:
@@ -152,17 +152,39 @@ export const processNoteInBackground = async (noteId) => {
     for (const tone of tones) {
       try {
         explanations[tone] = await explainNotePrompt(note, tone);
-        await wait(3000); // 3 second gap between each tone
-      } catch {
+        await wait(3000);
+      } catch (err) {
+        console.error(`[Background] Tone "${tone}" failed:`, err.message);
         explanations[tone] = "";
       }
     }
 
-    await wait(3000); // gap before quiz
-    const quiz = await generateQuizPrompt(note, 25); // was 12
+    // If every single tone failed, mark as failed and stop
+    const allTonesFailed = Object.values(explanations).every((v) => v === "");
+    if (allTonesFailed) {
+      console.error(
+        `[Background] All tones failed for note ${noteId}, marking as failed`,
+      );
+      await Note.findByIdAndUpdate(noteId, { processingStatus: "failed" });
+      return;
+    }
 
-    await wait(3000); // gap before flashcards
-    const flashcards = await generateFlashcardsPrompt(note);
+    let quiz = [];
+    let flashcards = [];
+
+    try {
+      await wait(3000);
+      quiz = await generateQuizPrompt(note, 25);
+    } catch (err) {
+      console.error(`[Background] Quiz generation failed:`, err.message);
+    }
+
+    try {
+      await wait(3000);
+      flashcards = await generateFlashcardsPrompt(note);
+    } catch (err) {
+      console.error(`[Background] Flashcards generation failed:`, err.message);
+    }
 
     await Note.findByIdAndUpdate(noteId, {
       explanations,
@@ -170,6 +192,8 @@ export const processNoteInBackground = async (noteId) => {
       flashcards,
       processingStatus: "complete",
     });
+
+    console.log(`[Background] Processing complete for note ${noteId}`);
   } catch (error) {
     console.error(
       `[Background] Processing failed for note ${noteId}:`,
