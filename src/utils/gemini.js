@@ -140,6 +140,20 @@ Be encouraging in tone. Start with "Let's go over the areas you need to review:"
 export const processNoteInBackground = async (noteId) => {
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  const isQuotaError = (err) =>
+    err.message?.includes("429") ||
+    err.message?.includes("Too Many Requests") ||
+    err.message?.includes("quota");
+
+  const markFailed = async () => {
+    try {
+      await Note.findByIdAndUpdate(noteId, { processingStatus: "failed" });
+      console.error(`[Background] Note ${noteId} marked as failed`);
+    } catch (e) {
+      console.error(`[Background] Failed to mark note as failed:`, e.message);
+    }
+  };
+
   try {
     const note = await Note.findById(noteId);
     if (!note) return;
@@ -156,16 +170,21 @@ export const processNoteInBackground = async (noteId) => {
       } catch (err) {
         console.error(`[Background] Tone "${tone}" failed:`, err.message);
         explanations[tone] = "";
+
+        // Quota exhausted — no point trying remaining tones
+        if (isQuotaError(err)) {
+          console.error(
+            `[Background] Quota error detected, aborting note ${noteId}`,
+          );
+          await markFailed();
+          return;
+        }
       }
     }
 
-    // If every single tone failed, mark as failed and stop
     const allTonesFailed = Object.values(explanations).every((v) => v === "");
     if (allTonesFailed) {
-      console.error(
-        `[Background] All tones failed for note ${noteId}, marking as failed`,
-      );
-      await Note.findByIdAndUpdate(noteId, { processingStatus: "failed" });
+      await markFailed();
       return;
     }
 
@@ -177,6 +196,10 @@ export const processNoteInBackground = async (noteId) => {
       quiz = await generateQuizPrompt(note, 25);
     } catch (err) {
       console.error(`[Background] Quiz generation failed:`, err.message);
+      if (isQuotaError(err)) {
+        await markFailed();
+        return;
+      }
     }
 
     try {
@@ -184,6 +207,10 @@ export const processNoteInBackground = async (noteId) => {
       flashcards = await generateFlashcardsPrompt(note);
     } catch (err) {
       console.error(`[Background] Flashcards generation failed:`, err.message);
+      if (isQuotaError(err)) {
+        await markFailed();
+        return;
+      }
     }
 
     await Note.findByIdAndUpdate(noteId, {
@@ -199,6 +226,6 @@ export const processNoteInBackground = async (noteId) => {
       `[Background] Processing failed for note ${noteId}:`,
       error.message,
     );
-    await Note.findByIdAndUpdate(noteId, { processingStatus: "failed" });
+    await markFailed();
   }
 };

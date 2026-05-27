@@ -5,6 +5,7 @@ import {
   generateQuizPrompt,
   generateFlashcardsPrompt,
   explainFailedTopicsPrompt,
+  processNoteInBackground,
 } from "../utils/gemini.js";
 
 import jwt from "jsonwebtoken";
@@ -24,7 +25,11 @@ export const explainNote = async (req, res) => {
     // 1. Check Redis
     const cached = await getCache(cacheKey);
     if (cached) {
-      return res.status(200).json({ explanation: cached, source: "redis" });
+      return res.status(200).json({
+        explanation: cached,
+        source: "redis",
+        dailyUsage: req.user.dailyUsage,
+      });
     }
 
     // 2. Check MongoDB
@@ -35,11 +40,12 @@ export const explainNote = async (req, res) => {
           $addToSet: { "charged.explanations": tone },
         });
       }
-      // Store in Redis for next time
       await setCache(cacheKey, note.explanations[tone]);
-      return res
-        .status(200)
-        .json({ explanation: note.explanations[tone], source: "db" });
+      return res.status(200).json({
+        explanation: note.explanations[tone],
+        source: "db",
+        dailyUsage: req.user.dailyUsage,
+      });
     }
 
     // 3. Call Gemini — last resort
@@ -53,7 +59,11 @@ export const explainNote = async (req, res) => {
 
     await setCache(cacheKey, explanation);
 
-    res.status(200).json({ explanation, source: "generated" });
+    res.status(200).json({
+      explanation,
+      source: "generated",
+      dailyUsage: req.user.dailyUsage,
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -79,9 +89,12 @@ export const generateQuiz = async (req, res) => {
     if (cached) {
       const questions = pickFrom(cached);
       if (questions.length >= count) {
-        return res.status(200).json({ quiz: questions, source: "redis" });
+        return res.status(200).json({
+          quiz: questions,
+          source: "redis",
+          dailyUsage: req.user.dailyUsage,
+        });
       }
-      // Not enough unseen in cache — fall through to DB
     }
 
     // 2. Check MongoDB
@@ -95,7 +108,11 @@ export const generateQuiz = async (req, res) => {
 
       if (questions.length >= count) {
         await setCache(cacheKey, note.quiz);
-        return res.status(200).json({ quiz: questions, source: "db" });
+        return res.status(200).json({
+          quiz: questions,
+          source: "db",
+          dailyUsage: req.user.dailyUsage,
+        });
       }
 
       // Pool exhausted — generate a fresh batch and append
@@ -106,22 +123,29 @@ export const generateQuiz = async (req, res) => {
       await setCache(cacheKey, expandedPool);
 
       const freshPick = pickFrom(expandedPool);
-      return res
-        .status(200)
-        .json({ quiz: freshPick.slice(0, count), source: "expanded" });
+      return res.status(200).json({
+        quiz: freshPick.slice(0, count),
+        source: "expanded",
+        dailyUsage: req.user.dailyUsage,
+      });
     }
 
-    // 3. Gemini fallback (quiz was never pre-generated)
+    // 3. Gemini fallback
     const quiz = await generateQuizPrompt(note, 25);
     await req.incrementUsage();
     await Note.findByIdAndUpdate(note._id, { quiz, "charged.quiz": true });
     await setCache(cacheKey, quiz);
 
-    res.status(200).json({ quiz: pickFrom(quiz), source: "generated" });
+    res.status(200).json({
+      quiz: pickFrom(quiz),
+      source: "generated",
+      dailyUsage: req.user.dailyUsage,
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
+
 export const generateFlashcards = async (req, res) => {
   try {
     const note = await Note.findOne({
@@ -135,7 +159,11 @@ export const generateFlashcards = async (req, res) => {
     // 1. Check Redis
     const cached = await getCache(cacheKey);
     if (cached) {
-      return res.status(200).json({ flashcards: cached, source: "redis" });
+      return res.status(200).json({
+        flashcards: cached,
+        source: "redis",
+        dailyUsage: req.user.dailyUsage,
+      });
     }
 
     // 2. Check MongoDB
@@ -145,9 +173,11 @@ export const generateFlashcards = async (req, res) => {
         await Note.findByIdAndUpdate(note._id, { "charged.flashcards": true });
       }
       await setCache(cacheKey, note.flashcards);
-      return res
-        .status(200)
-        .json({ flashcards: note.flashcards, source: "db" });
+      return res.status(200).json({
+        flashcards: note.flashcards,
+        source: "db",
+        dailyUsage: req.user.dailyUsage,
+      });
     }
 
     // 3. Call Gemini
@@ -160,7 +190,11 @@ export const generateFlashcards = async (req, res) => {
     });
     await setCache(cacheKey, flashcards);
 
-    res.status(200).json({ flashcards, source: "generated" });
+    res.status(200).json({
+      flashcards,
+      source: "generated",
+      dailyUsage: req.user.dailyUsage,
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -182,7 +216,10 @@ export const explainFailedTopics = async (req, res) => {
     const explanation = await explainFailedTopicsPrompt(note, failedTopics);
     await req.incrementUsage();
 
-    res.status(200).json({ explanation });
+    res.status(200).json({
+      explanation,
+      dailyUsage: req.user.dailyUsage,
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -203,7 +240,6 @@ export const getProcessingStatus = async (req, res) => {
 
 export const streamProcessingStatus = async (req, res) => {
   try {
-    // Verify token from query param since EventSource can't send headers
     const token = req.query.token;
     if (!token)
       return res.status(401).json({ message: "Not authorized, no token" });
@@ -223,13 +259,11 @@ export const streamProcessingStatus = async (req, res) => {
     });
     if (!note) return res.status(404).json({ message: "Note not found" });
 
-    // SSE headers
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders();
 
-    // Already done — send immediately and close
     if (
       note.processingStatus === "complete" ||
       note.processingStatus === "failed"
@@ -240,7 +274,6 @@ export const streamProcessingStatus = async (req, res) => {
       return res.end();
     }
 
-    // Poll DB and stream updates
     const interval = setInterval(async () => {
       try {
         const updated = await Note.findById(note._id).select(
@@ -261,13 +294,11 @@ export const streamProcessingStatus = async (req, res) => {
       }
     }, 3000);
 
-    // Stop after 3 minutes
     const timeout = setTimeout(() => {
       clearInterval(interval);
       res.end();
     }, 180000);
 
-    // Clean up if client disconnects early
     req.on("close", () => {
       clearInterval(interval);
       clearTimeout(timeout);
@@ -276,6 +307,7 @@ export const streamProcessingStatus = async (req, res) => {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
+
 export const retryNote = async (req, res) => {
   try {
     const note = await Note.findOne({
